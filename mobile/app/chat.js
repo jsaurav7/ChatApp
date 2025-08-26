@@ -1,5 +1,4 @@
 import { useState, useEffect, useRef } from 'react';
-import { Ionicons } from '@expo/vector-icons';
 import {
     View,
     Text,
@@ -12,20 +11,72 @@ import {
     Animated,
 } from 'react-native';
 import { useLocalSearchParams, useNavigation } from 'expo-router';
+import { initSocket } from "./socket";
 
 export default function ChatScreen() {
     const { id, name } = useLocalSearchParams();
     const navigation = useNavigation();
+    const socketRef = useRef(null);
 
-    const [messages, setMessages] = useState([
-        { id: '1', text: 'Hello!', sender: 'other', time: '09:00 AM' },
-        { id: '2', text: 'Hi! How are you?', sender: 'me', time: '09:01 AM' },
-    ]);
+    const [messages, setMessages] = useState([]);
 
     const [inputText, setInputText] = useState('');
     const [online, setOnline] = useState(true);
+    const [lastSeen, setLastSeen] = useState(null);
     const flatListRef = useRef();
     const animatedDot = useRef(new Animated.Value(0)).current;
+
+    useEffect(() => {
+        (async () => {
+            if (socketRef.current) return;
+
+            const socket = await initSocket();
+            socketRef.current = socket;
+
+            socket.on("connect", () => {
+                socket.emit("messages", { toUserId: id });
+
+                socket.emit("seen", { toUserId: id });
+            });
+
+            socket.on("last_seen", (msg) => {
+                setOnline(!!msg.online)
+                setLastSeen(msg.last_seen)
+            });
+
+            socket.on("receive_message", (msg) => {
+                console.log("messages", msg)
+                setMessages((prev) => [...prev, msg]);
+
+                setTimeout(() => {
+                    flatListRef.current?.scrollToEnd({ animated: true });
+                }, 100);
+            });
+
+            socket.connect();
+        })()
+
+        return () => {
+            if (socketRef.current) {
+                socketRef.current.off("receive_message");
+                socketRef.current.off("last_seen");
+                socketRef.current.disconnect();
+                socketRef.current = null
+            }
+        };
+    }, [id]);
+
+    useEffect(() => {
+        if (!socketRef.current) return;
+
+        const interval = setInterval(() => {
+            if (socketRef.current.connected) {
+                socketRef.current.emit("seen", { toUserId: id });
+            }
+        }, 5000);
+
+        return () => clearInterval(interval);
+    }, [id, socketRef.current]);
 
     useEffect(() => {
         Animated.loop(
@@ -42,6 +93,11 @@ export default function ChatScreen() {
             headerTitle: () => (
                 <View style={styles.headerContainer}>
                     <Text style={styles.headerTitle}>{name || 'Chat'}</Text>
+                    {!online && lastSeen && (
+                        <Text style={styles.lastSeenText}>
+                            {lastSeen ? `last seen ${lastSeen}` : 'Offline'}
+                        </Text>
+                    )}
                     {online && (
                         <Animated.View
                             style={[
@@ -59,22 +115,15 @@ export default function ChatScreen() {
             ),
             headerTintColor: '#fff',
         });
-    }, [name, online]);
+    }, [name, online, lastSeen]);
 
     const sendMessage = () => {
         if (inputText.trim() === '') return;
 
-        const now = new Date();
-        const timeString = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        if (!socketRef.current || !socketRef.current.connected) return
 
-        const newMessage = {
-            id: Date.now().toString(),
-            text: inputText,
-            sender: 'me',
-            time: timeString,
-        };
+        socketRef.current.emit("send_message", { toUserId: id, content: inputText })
 
-        setMessages((prev) => [...prev, newMessage]);
         setInputText('');
 
         setTimeout(() => {
@@ -191,7 +240,13 @@ const styles = StyleSheet.create({
         fontSize: 18,
         fontWeight: 'bold',
         marginRight: 8,
-        color: '#fff', // changed to white
+        color: '#fff',
+    },
+    lastSeenText: {
+        fontSize: 10,
+        marginTop: 10,
+        marginStart: 2,
+        color: '#fff',
     },
     onlineDot: {
         width: 10,
